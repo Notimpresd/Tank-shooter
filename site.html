@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>2-Player Tank Arena</title>
+  <style>
+    html,body{height:100%;margin:0;background:#222;color:#ddd;font-family:Arial,Segoe UI,Helvetica}
+    #gameWrap{display:flex;flex-direction:column;height:100%}
+    canvas{background:#6b8f4c;display:block;margin:0 auto;border:6px solid #333;box-shadow:0 6px 18px rgba(0,0,0,.6)}
+    #hud{display:flex;justify-content:space-between;padding:8px 12px;align-items:center;gap:12px}
+    .hp{padding:6px 10px;background:rgba(0,0,0,0.35);border-radius:6px;font-size:14px}
+    button{padding:6px 10px;border-radius:6px;background:#444;color:#ddd;border:1px solid #666;cursor:pointer}
+    #credits{font-size:12px;color:#999;padding:6px 12px}
+    #overlay{
+      position:absolute;left:0;top:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;
+      pointer-events:none;
+    }
+    .menu{
+      pointer-events:all;
+      background:linear-gradient(180deg, rgba(0,0,0,0.6), rgba(0,0,0,0.8));
+      padding:24px;border-radius:8px;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.6);
+      color:#fff;
+    }
+    .menu h1{margin:0 0 12px;font-family:monospace}
+    .menu p{margin:8px 0 14px;color:#ddd;font-size:14px}
+    .menu button{font-size:16px;padding:10px 16px}
+    #msg{font-size:12px;color:#fbb;margin-top:8px}
+    #gameContainer{position:relative;flex:1;display:flex;align-items:center;justify-content:center;padding:12px;}
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <div id="hud">
+      <div class="hp" id="p1info">Player 1 — HP: <span id="p1hp">100</span> <small style="color:#999">WASD / `</small></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="muteBtn">Mute SFX</button>
+        <button id="musicBtn">Toggle Music</button>
+      </div>
+      <div class="hp" id="p2info">Player 2 — HP: <span id="p2hp">100</span> <small style="color:#999">Arrows / M</small></div>
+    </div>
+
+    <div id="gameContainer">
+      <canvas id="c" width="1000" height="600"></canvas>
+      <div id="overlay">
+        <div id="startMenu" class="menu">
+          <h1>2-Player Tank Arena</h1>
+          <p>Player 1: WASD to move, ` to shoot — Player 2: Arrows to move, M to shoot</p>
+          <button id="startBtn">Start Game</button>
+          <div id="msg"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="credits">Music & SFX: replace the &lt;source&gt; URLs with direct mp3/ogg file links you host or download. If you still hear nothing, your browser likely blocked autoplay or CORS — click the screen to allow sound.</div>
+  </div>
+
+  <!-- Audio elements (replace src with direct mp3/ogg file URLs you download or host) -->
+  <audio id="music" loop crossorigin="anonymous" preload="auto">
+    <!-- Replace these sample links with direct downloadable files you host or have permission for. -->
+    <source src="https://opengameart.org/sites/default/files/8bit-spaceshooter.mp3" type="audio/mpeg">
+  </audio>
+  <audio id="shootSfx" crossorigin="anonymous" preload="auto">
+    <source src="https://freesound.org/data/previews/156/156031_2561236-lq.mp3" type="audio/mpeg">
+  </audio>
+  <audio id="explosionSfx" crossorigin="anonymous" preload="auto">
+    <source src="https://freesound.org/data/previews/459/459973_512123-lq.mp3" type="audio/mpeg">
+  </audio>
+
+  <script>
+  // -----------------------------
+  // Initialization & globals
+  // -----------------------------
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  const music = document.getElementById('music');
+  const shootSfx = document.getElementById('shootSfx');
+  const explosionSfx = document.getElementById('explosionSfx');
+  let muted = false;
+  let audioAllowed = false;
+
+  const startMenu = document.getElementById('startMenu');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const msgEl = document.getElementById('msg');
+
+  document.getElementById('muteBtn').onclick = () => {
+    muted = !muted;
+    document.getElementById('muteBtn').textContent = muted ? 'Unmute SFX' : 'Mute SFX';
+  };
+  document.getElementById('musicBtn').onclick = async () => {
+    if(!audioAllowed){ msgEl.textContent = 'Click START (or anywhere) to enable audio.'; return; }
+    try{
+      if(music.paused) await music.play();
+      else music.pause();
+    }catch(e){
+      console.warn('music play failed', e);
+      msgEl.textContent = 'Browser blocked music — click/tap the screen.';
+    }
+  };
+
+  function allowAudioIfNeeded(){
+    audioAllowed = true;
+    // attempt to play small silent unlock
+    try{ music.play().then(()=>music.pause()).catch(()=>{}); }catch(e){}
+    try{ shootSfx.play().then(()=>shootSfx.pause()).catch(()=>{}); }catch(e){}
+    try{ explosionSfx.play().then(()=>explosionSfx.pause()).catch(()=>{}); }catch(e){}
+  }
+
+  // -----------------------------
+  // Game world
+  // -----------------------------
+  function rand(min,max){return Math.random()*(max-min)+min}
+
+  let obstacles = [];
+  function generateObstacles(){
+    obstacles = [];
+    for(let i=0;i<8;i++){
+      const ow = rand(60,140), oh = rand(40,120);
+      const ox = rand(80, W-80-ow), oy = rand(80, H-80-oh);
+      obstacles.push({x:ox,y:oy,w:ow,h:oh});
+    }
+  }
+  generateObstacles();
+
+  // Tanks now have velocities and smooth rotation
+  function makeTank(opts){
+    return Object.assign({
+      x: W/2, y:H/2, angle:0, color:'#3aa', hp:100, speed:140, r:18,
+      vx:0, vy:0, maxSpeed:160, accel:800, friction:0.85, rotateSpeed:8, // rotateSpeed in rad/sec
+      lastShot:0, fireRate:250
+    }, opts);
+  }
+
+  let tanks = [
+    makeTank({x:120,y:H/2,angle:0, color:'#3aa', keys:{up:'w',down:'s',left:'a',right:'d',shoot:'`'}}),
+    makeTank({x:W-120,y:H/2,angle:Math.PI, color:'#a53', keys:{up:'arrowup',down:'arrowdown',left:'arrowleft',right:'arrowright',shoot:'m'}})
+  ];
+
+  let bullets = [];
+
+  // -----------------------------
+  // Input handling
+  // -----------------------------
+  const keyState = {};
+  window.addEventListener('keydown', e=>{
+    const k = e.key.toLowerCase();
+    keyState[k] = true;
+    // prevent accidental scroll when arrow keys used
+    if(['arrowup','arrowdown','arrowleft','arrowright'].includes(k)) e.preventDefault();
+    if(['`','m'].includes(e.key.toLowerCase())) e.preventDefault();
+  }, {passive:false});
+  window.addEventListener('keyup', e=>{ keyState[e.key.toLowerCase()]=false; });
+
+  window.addEventListener('blur', ()=>{ for(const k in keyState) keyState[k]=false; });
+
+  // -----------------------------
+  // Collision helpers
+  // -----------------------------
+  function rectCircleCollide(rx,ry,rw,rh,cx,cy,cr){
+    const nearestX = Math.max(rx, Math.min(cx, rx+rw));
+    const nearestY = Math.max(ry, Math.min(cy, ry+rh));
+    const dx = cx - nearestX, dy = cy - nearestY;
+    return (dx*dx+dy*dy) <= cr*cr;
+  }
+  function circleRectOverlap(cx,cy,cr, rx,ry,rw,rh){ return rectCircleCollide(rx,ry,rw,rh,cx,cy,cr); }
+  function collideWithObstacles(x,y,r){
+    for(const o of obstacles) if(circleRectOverlap(x,y,r,o.x,o.y,o.w,o.h)) return true;
+    return false;
+  }
+
+  function tryMove(tank, nx, ny){
+    if(nx - tank.r < 0 || nx + tank.r > W || ny - tank.r < 0 || ny + tank.r > H) return false;
+    if(collideWithObstacles(nx,ny,tank.r)) return false;
+    const other = tanks.find(t=>t!==tank);
+    const d2 = (other.x-nx)*(other.x-nx)+(other.y-ny)*(other.y-nx); // intentional small check below
+    const dx = other.x - nx, dy = other.y - ny;
+    const dist2 = dx*dx+dy*dy;
+    if(dist2 < (tank.r+other.r+6)*(tank.r+other.r+6)) return false;
+    tank.x = nx; tank.y = ny;
+    return true;
+  }
+
+  // -----------------------------
+  // Firing
+  // -----------------------------
+  function fire(tank){
+    const now = performance.now();
+    if(now - tank.lastShot < tank.fireRate) return;
+    tank.lastShot = now;
+    const speed = 380; // px/sec
+    const angle = tank.angle;
+    bullets.push({
+      x: tank.x + Math.cos(angle)*(tank.r+8),
+      y: tank.y + Math.sin(angle)*(tank.r+8),
+      vx: Math.cos(angle)*speed,
+      vy: Math.sin(angle)*speed,
+      owner: tank, life: 2000, born: now
+    });
+    if(!muted && audioAllowed){
+      try{ shootSfx.currentTime = 0; shootSfx.play().catch(()=>{}); }catch(e){}
+    }
+  }
+
+  // -----------------------------
+  // Update / physics
+  // -----------------------------
+  function update(dt){
+    const dtSec = dt/1000;
+
+    for(const tank of tanks){
+      const k = tank.keys;
+      // read movement inputs (raw)
+      let inX = 0, inY = 0;
+      if(keyState[k.up]) inY -= 1;
+      if(keyState[k.down]) inY += 1;
+      if(keyState[k.left]) inX -= 1;
+      if(keyState[k.right]) inX += 1;
+
+      // desired movement direction in world coords
+      let targetAngle = tank.angle;
+      let moving = false;
+      if(inX !== 0 || inY !== 0){
+        moving = true;
+        // We want a smooth directional control: player's input vector is used as desired movement direction
+        targetAngle = Math.atan2(inY, inX);
+      }
+
+      // smooth rotation: rotate tank.angle toward targetAngle
+      // compute shortest angular difference
+      function normalizeAngle(a){
+        while(a > Math.PI) a -= Math.PI*2;
+        while(a < -Math.PI) a += Math.PI*2;
+        return a;
+      }
+      const diff = normalizeAngle(targetAngle - tank.angle);
+      const maxDelta = tank.rotateSpeed * dtSec; // rad this frame
+      const applied = Math.max(-maxDelta, Math.min(maxDelta, diff));
+      // only rotate toward target if moving; otherwise keep last heading slightly (or optionally return to zero)
+      if(moving) tank.angle = normalizeAngle(tank.angle + applied);
+
+      // acceleration toward desired velocity
+      const desiredVx = moving ? Math.cos(targetAngle) * tank.maxSpeed : 0;
+      const desiredVy = moving ? Math.sin(targetAngle) * tank.maxSpeed : 0;
+
+      // simple accel model: approach desired velocity
+      const ax = (desiredVx - tank.vx) * Math.min(1, tank.accel * dtSec / tank.maxSpeed);
+      const ay = (desiredVy - tank.vy) * Math.min(1, tank.accel * dtSec / tank.maxSpeed);
+      tank.vx += ax;
+      tank.vy += ay;
+
+      // friction when no input to slow down
+      if(!moving){
+        tank.vx *= Math.pow(tank.friction, dtSec*60);
+        tank.vy *= Math.pow(tank.friction, dtSec*60);
+      }
+
+      // integrate
+      const nextX = tank.x + tank.vx * dtSec;
+      const nextY = tank.y + tank.vy * dtSec;
+
+      // collision checks - simple: if movement collides, zero velocity component and don't move into obstacle
+      let moved = false;
+      if(!collideWithObstacles(nextX, tank.y, tank.r) && nextX - tank.r >= 0 && nextX + tank.r <= W){
+        tank.x = nextX; moved=true;
+      } else { tank.vx = 0; }
+      if(!collideWithObstacles(tank.x, nextY, tank.r) && nextY - tank.r >= 0 && nextY + tank.r <= H){
+        tank.y = nextY; moved=true;
+      } else { tank.vy = 0; }
+
+      // shooting
+      if(keyState[k.shoot]) fire(tank);
+    }
+
+    // bullets update
+    for(let i=bullets.length-1;i>=0;i--){
+      const b = bullets[i];
+      b.x += b.vx * dt/1000;
+      b.y += b.vy * dt/1000;
+      // life
+      if(performance.now() - b.born > b.life){ bullets.splice(i,1); continue; }
+      if(b.x< -10 || b.x>W+10 || b.y< -10 || b.y>H+10){ bullets.splice(i,1); continue; }
+
+      // hits obstacle
+      let hitObstacle=false;
+      for(const o of obstacles){
+        if(circleRectOverlap(b.x,b.y,4,o.x,o.y,o.w,o.h)){ hitObstacle=true; break; }
+      }
+      if(hitObstacle){ bullets.splice(i,1); continue; }
+
+      // hits tank
+      for(const tank of tanks){
+        if(tank===b.owner) continue;
+        const dx = tank.x - b.x, dy = tank.y - b.y;
+        if(dx*dx+dy*dy < (tank.r+4)*(tank.r+4)){
+          bullets.splice(i,1);
+          tank.hp -= 12;
+          if(!muted && audioAllowed){ try{ explosionSfx.currentTime = 0; explosionSfx.play().catch(()=>{}); }catch(e){} }
+          if(tank.hp<=0) tank.hp = 0;
+          break;
+        }
+      }
+    }
+
+    // update HUD
+    document.getElementById('p1hp').textContent = Math.max(0, Math.round(tanks[0].hp));
+    document.getElementById('p2hp').textContent = Math.max(0, Math.round(tanks[1].hp));
+  }
+
+  // -----------------------------
+  // Drawing
+  // -----------------------------
+  function drawTank(t){
+    // shadow — draw in world coordinates so it doesn't rotate with the tank
+    ctx.save();
+    const shadowX = t.x;
+    const shadowY = t.y + t.r + 10;
+    ctx.fillStyle='rgba(0,0,0,0.25)';
+    ctx.beginPath(); ctx.ellipse(shadowX, shadowY, t.r+12, 8, 0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+
+    // tank body/turret rotated around center
+    ctx.save();
+    ctx.translate(t.x,t.y);
+    ctx.rotate(t.angle);
+    // body
+    ctx.fillStyle = t.color; ctx.fillRect(-t.r, -t.r, t.r*2, t.r*2);
+    ctx.strokeStyle='#111'; ctx.lineWidth=2; ctx.strokeRect(-t.r, -t.r, t.r*2, t.r*2);
+    // turret
+    ctx.fillStyle='#222'; ctx.fillRect(0,-6, t.r+14, 12);
+    ctx.restore();
+
+    // health bar above
+    const barW = 56, barH = 8;
+    ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(t.x - barW/2, t.y - t.r - 20, barW, barH);
+    const hpRatio = Math.max(0, t.hp)/100;
+    ctx.fillStyle = hpRatio>0.5? '#4caf50' : (hpRatio>0.2? '#f1c232' : '#d9534f');
+    ctx.fillRect(t.x - barW/2 + 1, t.y - t.r - 20 + 1, (barW-2) * hpRatio, barH-2);
+    ctx.strokeStyle='#000'; ctx.lineWidth=1; ctx.strokeRect(t.x - barW/2, t.y - t.r - 20, barW, barH);
+
+    // name / hp label text
+    ctx.fillStyle='#fff'; ctx.font='12px monospace'; ctx.textAlign='center';
+    if(t.hp>0) ctx.fillText('HP:' + Math.round(t.hp), t.x, t.y - t.r - 28);
+    else ctx.fillText('DEAD', t.x, t.y - t.r - 28);
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+
+    // ground grid
+    ctx.save();
+    ctx.strokeStyle='rgba(0,0,0,0.06)'; ctx.lineWidth=1;
+    for(let gx=0;gx<W;gx+=40){ ctx.beginPath(); ctx.moveTo(gx,0); ctx.lineTo(gx,H); ctx.stroke(); }
+    for(let gy=0;gy<H;gy+=40){ ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke(); }
+    ctx.restore();
+
+    // obstacles
+    for(const o of obstacles){
+      ctx.fillStyle='#554'; ctx.fillRect(o.x,o.y,o.w,o.h);
+      ctx.strokeStyle='#332'; ctx.strokeRect(o.x,o.y,o.w,o.h);
+    }
+
+    // bullets
+    for(const b of bullets){
+      ctx.beginPath(); ctx.fillStyle='#ffec9a'; ctx.arc(b.x,b.y,4,0,Math.PI*2); ctx.fill();
+    }
+
+    // tanks
+    for(const t of tanks) drawTank(t);
+
+    // instructions
+    ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.fillRect(8,H-52,540,44);
+    ctx.fillStyle='#ddd'; ctx.font='13px monospace'; ctx.textAlign='left';
+    ctx.fillText('P1: WASD to move, ` to shoot    P2: Arrows to move, M to shoot', 16, H-30);
+  }
+
+  // -----------------------------
+  // Game loop and state
+  // -----------------------------
+  let last = performance.now();
+  let running = false;
+  let rafId = null;
+
+  function loop(ts){
+    const dt = ts - last; last = ts;
+    update(dt); draw();
+
+    // check win
+    if(tanks[0].hp<=0 || tanks[1].hp<=0){
+      showGameOver();
+      return; // stop loop
+    }
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function startGame(){
+    // reset world & tanks but keep obstacles
+    tanks = [
+      makeTank({x:120,y:H/2,angle:0, color:'#3aa', keys:{up:'w',down:'s',left:'a',right:'d',shoot:'`'}}),
+      makeTank({x:W-120,y:H/2,angle:Math.PI, color:'#a53', keys:{up:'arrowup',down:'arrowdown',left:'arrowleft',right:'arrowright',shoot:'m'}})
+    ];
+    bullets = [];
+    // regenerate obstacles slightly so replay feels new (optional)
+    generateObstacles();
+    last = performance.now();
+    running = true;
+    overlay.style.pointerEvents = 'none';
+    startMenu.style.display = 'none';
+    cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function showGameOver(){
+    running = false;
+    cancelAnimationFrame(rafId);
+    overlay.style.pointerEvents = 'all';
+    // draw a translucent overlay + text
+    ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#fff'; ctx.font='48px monospace'; ctx.textAlign='center';
+    const winner = tanks[0].hp>0 ? 'Player 1 wins!' : (tanks[1].hp>0 ? 'Player 2 wins!' : 'Draw');
+    ctx.fillText(winner, W/2, H/2 - 20);
+
+    // create a small menu replace startMenu content
+    startMenu.style.display = 'block';
+    startMenu.innerHTML = `<h1>${winner}</h1>
+      <p>Click replay to play again.</p>
+      <button id="replayBtn">Replay</button>
+      <div style="margin-top:8px"><button id="menuQuit">Quit</button></div>`;
+    document.getElementById('replayBtn').onclick = () => {
+      // restore original start menu after click
+      startMenu.innerHTML = '<h1>2-Player Tank Arena</h1><p>Player 1: WASD to move, ` to shoot — Player 2: Arrows to move, M to shoot</p><button id="startBtn">Start Game</button><div id="msg"></div>';
+      document.getElementById('startBtn').onclick = () => { allowAudioIfNeeded(); startGame(); };
+      document.getElementById('msg').textContent = '';
+    };
+    document.getElementById('menuQuit').onclick = () => { startMenu.innerHTML = '<h1>Thanks for playing</h1>'; };
+  }
+
+  // -----------------------------
+  // Events for starting and audio
+  // -----------------------------
+  startBtn.onclick = () => { allowAudioIfNeeded(); startGame(); };
+
+  // also allow audio on any click on canvas if menu is hidden
+  window.addEventListener('click', (e)=>{
+    allowAudioIfNeeded();
+    // if click happened while menu visible, start prompt remains
+  });
+
+  // start paused draw so user sees arena before start
+  draw();
+
+  // hint about audio if click-block occurs
+  window.addEventListener('touchstart', allowAudioIfNeeded, {passive:true});
+  </script>
+</body>
+</html>
